@@ -1,0 +1,184 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+from torchvision.models import resnet18
+from sklearn.model_selection import KFold
+import numpy as np
+import shap
+from sklearn.metrics.pairwise import cosine_distances
+from sklearn.metrics.pairwise import euclidean_distances
+
+
+# 1️⃣ Classe de prétraitement
+class Preprocessor:
+    def __init__(self):
+        self.transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225])
+        ])
+
+    def load_dataset(self, name="CIFAR10", train=True):
+        if name == "CIFAR10":
+            return datasets.CIFAR10(root='./data', train=train, download=True, transform=self.transform)
+        elif name == "FashionMNIST":
+            return datasets.FashionMNIST(root='./data', train=train, download=True, transform=self.transform)
+        else:
+            raise ValueError("Dataset non supporté")
+
+    def create_dataloader(self, dataset, batch_size=64, shuffle=True):
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+    def split_data(self, dataset, K=5):
+        kfold = KFold(n_splits=K, shuffle=True, random_state=42)
+        train_loaders, val_loaders = [], []
+
+        for train_idx, val_idx in kfold.split(dataset):
+            train_subset = Subset(dataset, train_idx)
+            val_subset = Subset(dataset, val_idx)
+            train_loaders.append(DataLoader(
+                train_subset, batch_size=64, shuffle=True))
+            val_loaders.append(DataLoader(
+                val_subset, batch_size=64, shuffle=False))
+
+        return train_loaders, val_loaders
+
+
+# 2️⃣ Classe d'entraînement et modèle
+class Trainer:
+    def __init__(self, num_classes):
+        self.model = self.set_resnet_model(num_classes)
+
+    def set_resnet_model(self, num_classes):
+        model = resnet18(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+        return model
+
+    def train(self, data_loader, epochs=5, max_batches=None):
+        self.model.train()
+        optimizer = optim.Adam(self.model.fc.parameters(), lr=0.001)
+        criterion = nn.CrossEntropyLoss()
+
+        for epoch in range(epochs):
+            for i, (images, labels) in enumerate(data_loader):
+                if max_batches is not None and i >= max_batches:
+                    break
+
+                optimizer.zero_grad()
+                outputs = self.model(images)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                print(f"Epoch {epoch} Batch {i}: Loss = {loss.item():.4f}")
+
+    def predict(self, x):
+        self.model.eval()
+        with torch.no_grad():
+            output = self.model(x)
+            return torch.argmax(output, dim=1).item()
+
+
+# 3️⃣ Classe pour SHAP
+class Explainer:
+    def __init__(self, model, background_data):
+        self.explainer = shap.GradientExplainer(model, background_data)
+        self.model = model
+
+    def prepare_background(self, loader, num_background=50, num_test=1):
+        images_accum = []
+        for images, _ in loader:
+            images_accum.append(images)
+            if len(torch.cat(images_accum)) >= num_background + num_test:
+                break
+        all_images = torch.cat(images_accum, dim=0)
+        background = all_images[:num_background]
+        test_sample = all_images[num_background:num_background + num_test]
+        return background, test_sample
+
+    def shap_explain(self, image):
+        try:
+            if len(image.shape) == 3:
+                # attention inuput de la fonction doit être de la dimension d'un batch (shape: [1, 3, 224, 224])
+                shap_values = self.explainer.shap_values(image.unsqueeze(0))
+                output = self.model(image.unsqueeze(0))
+                predicted_class = output.argmax(dim=1).item()
+
+            elif len(image.shape) == 4:
+                shap_values = self.explainer.shap_values(image)
+                output = self.model(image)
+                predicted_class = output.argmax(dim=1).item()
+
+        except:
+            print('Image dimension failed')
+
+        reshaped_shape_values = shap_values[..., predicted_class].squeeze(0)
+        reshaped_shape_values_hwc = reshaped_shape_values.transpose(1, 2, 0)
+        image_test_hwc = image.numpy().transpose(1, 2, 0)
+
+        return reshaped_shape_values_hwc, image_test_hwc
+
+
+if __name__ == "__main__":
+
+    # Initialisation
+    prep = Preprocessor()
+    train_data = prep.load_dataset(train=True)
+    train_loader = prep.create_dataloader(train_data)
+
+    # Split data
+    train_data_split1 = prep.split_data(train_data, K=4)[
+        0][0]  # test sur les 3 premiers batch
+
+    # Modèle
+    trainer = Trainer(num_classes=10)
+    trainer.train(train_data_split1, epochs=1, max_batches=3)
+
+    # Variables
+    background = next(iter(train_loader))[0][:10]
+
+    # Préparation SHAP
+    expl = Explainer(trainer.model, background_data=background)
+
+    # Visualisation SHAP
+    img = next(iter(train_loader))[0][0]
+    shap_map, img_np = expl.shap_explain(img)
+
+    # Predict class
+    output = trainer.model(img.unsqueeze(0))
+    pred = trainer.predict(img.unsqueeze(0))
+    # pred = trainer.predict(output)
+    print('class = ', pred)
+
+    # Affichage
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(8, 5))
+    shap.image_plot(shap_map, img_np)
+
+    # Boucle d'entrainement des K fonctions
+    dataset_splited_4fold = prep.split_data(train_data, K=4)
+    dico_phi = {}
+    dico_pred = {}
+    c = 1                               # Compteur
+
+    for fold in dataset_splited_4fold[0]:
+        print(f'\n split {c} ')
+        model = Trainer(num_classes=10)
+        model.train(fold, epochs=1, max_batches=3)
+        # train_model(1,model,fold,max_batches=3)
+        # explain = shap.GradientExplainer(model, background)
+        expl = Explainer(model.model, background_data=background)
+        shap_map, img_np = expl.shap_explain(img)
+        # phi_x_fold = shap_explain(x,model,explain)
+        dico_phi[c] = shap_map
+        # predicted = predict(model,x)
+        # output = model(img.unsqueeze(0))
+        # predicted_class = output.argmax(dim=1).item()
+        predicted_class = model.predict(img.unsqueeze(0))
+        dico_pred[c] = predicted_class
+        c += 1
