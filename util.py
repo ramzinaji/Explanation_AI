@@ -9,6 +9,7 @@ import numpy as np
 import shap
 from sklearn.metrics.pairwise import cosine_distances
 from sklearn.metrics.pairwise import euclidean_distances
+import os
 
 
 # 1️⃣ Classe de prétraitement
@@ -124,61 +125,130 @@ class Explainer:
         return reshaped_shape_values_hwc, image_test_hwc
 
 
-if __name__ == "__main__":
-
-    # Initialisation
-    prep = Preprocessor()
+def train_single_model(prep, epochs=1):
     train_data = prep.load_dataset(train=True)
     train_loader = prep.create_dataloader(train_data)
+    train_data_split1 = prep.split_data(train_data, K=4)[0][0]
 
-    # Split data
-    train_data_split1 = prep.split_data(train_data, K=4)[
-        0][0]  # test sur les 3 premiers batch
-
-    # Modèle
     trainer = Trainer(num_classes=10)
-    trainer.train(train_data_split1, epochs=1, max_batches=3)
+    trainer.train(train_data_split1, epochs=epochs, max_batches=3)
 
-    # Variables
+    return trainer, train_loader, train_data
+
+
+def explain_and_plot(trainer, train_loader):
     background = next(iter(train_loader))[0][:10]
-
-    # Préparation SHAP
     expl = Explainer(trainer.model, background_data=background)
 
-    # Visualisation SHAP
     img = next(iter(train_loader))[0][0]
     shap_map, img_np = expl.shap_explain(img)
-
-    # Predict class
     output = trainer.model(img.unsqueeze(0))
     pred = trainer.predict(img.unsqueeze(0))
-    # pred = trainer.predict(output)
+
     print('class = ', pred)
 
-    # Affichage
     import matplotlib.pyplot as plt
     plt.figure(figsize=(8, 5))
     shap.image_plot(shap_map, img_np)
 
-    # Boucle d'entrainement des K fonctions
+
+def run_kfold_training(prep, background, img):
+    train_data = prep.load_dataset(train=True)
     dataset_splited_4fold = prep.split_data(train_data, K=4)
     dico_phi = {}
     dico_pred = {}
-    c = 1                               # Compteur
-
+    c = 1
     for fold in dataset_splited_4fold[0]:
         print(f'\n split {c} ')
         model = Trainer(num_classes=10)
         model.train(fold, epochs=1, max_batches=3)
-        # train_model(1,model,fold,max_batches=3)
-        # explain = shap.GradientExplainer(model, background)
         expl = Explainer(model.model, background_data=background)
         shap_map, img_np = expl.shap_explain(img)
-        # phi_x_fold = shap_explain(x,model,explain)
         dico_phi[c] = shap_map
-        # predicted = predict(model,x)
-        # output = model(img.unsqueeze(0))
-        # predicted_class = output.argmax(dim=1).item()
         predicted_class = model.predict(img.unsqueeze(0))
         dico_pred[c] = predicted_class
         c += 1
+    return dico_phi, dico_pred, img, train_data
+
+
+def delete_folder(folder_path):
+    if os.path.exists(folder_path):
+        for root, dirs, files in os.walk(folder_path, topdown=False):
+            for name in files:
+                os.remove(os.path.join(root, name))
+            for name in dirs:
+                os.rmdir(os.path.join(root, name))
+        os.rmdir(folder_path)
+
+
+# if __name__ == "__main__":
+
+#     # Initialisation
+#     prep = Preprocessor()
+#     train_data = prep.load_dataset(train=True)
+#     train_loader = prep.create_dataloader(train_data)
+
+#     # Split data
+#     train_data_split1 = prep.split_data(train_data, K=4)[
+#         0][0]  # test sur les 3 premiers batch
+
+#     # Modèle
+#     trainer = Trainer(num_classes=10)
+#     trainer.train(train_data_split1, epochs=1, max_batches=3)
+
+#     # Variables
+#     background = next(iter(train_loader))[0][:10]
+
+#     # Préparation SHAP
+#     expl = Explainer(trainer.model, background_data=background)
+
+#     # Visualisation SHAP
+#     img = next(iter(train_loader))[0][0]
+#     shap_map, img_np = expl.shap_explain(img)
+
+#     # Predict class
+#     output = trainer.model(img.unsqueeze(0))
+#     pred = trainer.predict(img.unsqueeze(0))
+#     # pred = trainer.predict(output)
+#     print('class = ', pred)
+
+#     # Affichage
+#     import matplotlib.pyplot as plt
+#     plt.figure(figsize=(8, 5))
+#     shap.image_plot(shap_map, img_np)
+
+#     # Boucle d'entrainement des K fonctions
+#     dataset_splited_4fold = prep.split_data(train_data, K=4)
+#     dico_phi = {}
+#     dico_pred = {}
+#     # Compteur
+#     c = 1
+#     for fold in dataset_splited_4fold[0]:
+#         print(f'\n split {c} ')
+#         model = Trainer(num_classes=10)
+#         model.train(fold, epochs=1, max_batches=3)
+#         expl = Explainer(model.model, background_data=background)
+#         shap_map, img_np = expl.shap_explain(img)
+#         # Sauvegarde des valeurs shaps pour img pour chaque fonction
+#         dico_phi[c] = shap_map
+#         predicted_class = model.predict(img.unsqueeze(0))
+#         # Sauvgarde des prédictions de chaque fonction
+#         dico_pred[c] = predicted_class
+#         c += 1
+
+if __name__ == "__main__":
+    prep = Preprocessor()
+    trainer, train_loader, train_data = train_single_model(prep)
+
+    # Facultatif : afficher l’explication SHAP
+    # explain_and_plot(trainer, train_loader)
+
+    background = next(iter(train_loader))[0][:10]
+    img = next(iter(train_loader))[0][0]
+
+    # Juste exécuter la boucle KFold
+    dico_phi, dico_pred, img, train_data = run_kfold_training(
+        prep, background, img)
+
+    # Supprime le dossier ./data
+    delete_folder('./data')
