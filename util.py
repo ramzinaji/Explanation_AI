@@ -125,6 +125,88 @@ class Explainer:
         return reshaped_shape_values_hwc, image_test_hwc
 
 
+# class ConsistencyMetrics:
+#     def __init__(self, dico_phi, dico_pred, img, label):
+#         self.dico_phi = dico_phi
+#         self.dico_pred = dico_pred
+#         self.img = img
+#         self.label = label
+
+#     def compute_metrics(self):
+#         c = 0
+#         S = {}
+#         S_d = {}
+#         distances = {}
+#         n = len(self.dico_phi.keys())
+#         for i in self.dico_phi.keys():
+#             c += 1
+#             for j in range(c, n+1):
+#                 if i == j:
+#                     continue
+#                 else:
+#                     if self.dico_pred[i] == int(self.label) and self.dico_pred[j] == int(self.label):
+#                         distances[(i, j)] = euclidean_distances(
+#                             self.dico_phi[i], self.dico_phi[j])
+#                         S[(i, j)] = float(distances[(i, j)])
+#                     else:
+#                         distances[(i, j)] = euclidean_distances(
+#                             self.dico_phi[i], self.dico_phi[j])
+#                         S_d[(i, j)] = float(distances[(i, j)])
+
+#         MeGe_x = 1 / (1 + (1 / len(S.keys()))*np.sum(list(S.values())))
+
+#         return S, S_d, MeGe_x
+
+class ConsistencyMetrics:
+    def __init__(self, dico_phi, dico_pred, img, label, dist='euclidean'):
+        self.dico_phi = dico_phi
+        self.dico_pred = dico_pred
+        self.img = img
+        self.label = int(label)
+        self.dist = dist.lower()  # pour éviter la casse
+
+    def compute_metrics(self):
+        S = {}      # Paires avec même prédiction correcte
+        S_d = {}    # Paires avec au moins une prédiction incorrecte
+        distances = {}
+
+        keys = list(self.dico_phi.keys())
+        n = len(keys)
+
+        for i_idx in range(n):
+            i = keys[i_idx]
+            for j_idx in range(i_idx + 1, n):
+                j = keys[j_idx]
+
+                # Reshape SHAP maps en vecteurs ligne
+                phi_i = self.dico_phi[i].reshape(-1).reshape(1, -1)
+                phi_j = self.dico_phi[j].reshape(-1).reshape(1, -1)
+
+                # Choix de la distance
+                if self.dist == 'euclidean':
+                    dist = euclidean_distances(phi_i, phi_j)[0][0]
+                elif self.dist == 'cosine':
+                    dist = cosine_distances(phi_i, phi_j)[0][0]
+                else:
+                    raise ValueError("dist must be 'euclidean' or 'cosine'")
+
+                distances[(i, j)] = dist
+
+                # Catégorisation
+                if self.dico_pred[i] == self.label and self.dico_pred[j] == self.label:
+                    S[(i, j)] = dist
+                else:
+                    S_d[(i, j)] = dist
+
+        # Calcul de MeGe
+        if len(S) > 0:
+            MeGe_x = 1 / (1 + (1 / len(S)) * np.sum(list(S.values())))
+        else:
+            MeGe_x = 0.0  # ou np.nan selon ce que tu préfères
+
+        return S, S_d, MeGe_x
+
+
 def train_single_model(prep, epochs=1):
     train_data = prep.load_dataset(train=True)
     train_loader = prep.create_dataloader(train_data)
@@ -244,11 +326,24 @@ if __name__ == "__main__":
     # explain_and_plot(trainer, train_loader)
 
     background = next(iter(train_loader))[0][:10]
-    img = next(iter(train_loader))[0][0]
+    # img = next(iter(train_loader))[0][0]
+    images, labels = next(iter(train_loader))
+    img = images[0]
+    label = labels[0].item()
+    print('\n label img :', label)
 
     # Juste exécuter la boucle KFold
     dico_phi, dico_pred, img, train_data = run_kfold_training(
         prep, background, img)
+
+    # Calcul le score MeGe et les matrices S
+    metrics = ConsistencyMetrics(
+        dico_phi, dico_pred, img, label, dist='cosine')
+    S, S_d, MeGe_x = metrics.compute_metrics()
+
+    # Afficher l’explication SHAP
+    explain_and_plot(trainer, train_loader)
+    print('/n MeGe = ', MeGe_x)
 
     # Supprime le dossier ./data
     delete_folder('./data')
