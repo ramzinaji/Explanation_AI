@@ -1,0 +1,6 @@
+torch>=2.0.0
+torchvision>=0.15.1
+scikit-learn>=1.6.1
+numpy>=1.26.4
+shap>=0.47.2
+matplotlib>=3.10.1
