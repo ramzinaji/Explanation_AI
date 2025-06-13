@@ -343,7 +343,8 @@ if __name__ == "__main__":
 
     # Afficher l’explication SHAP
     explain_and_plot(trainer, train_loader)
-    print('/n MeGe = ', MeGe_x)
+    print('\n dico pred :', dico_pred)
+    print('\n MeGe = ', MeGe_x, '\n S = ', S, '\n S_d = ', S_d)
 
     # Supprime le dossier ./data
     delete_folder('./data')
