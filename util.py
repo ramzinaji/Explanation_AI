@@ -234,9 +234,9 @@ def explain_and_plot(trainer, train_loader):
     shap.image_plot(shap_map, img_np)
 
 
-def run_kfold_training(prep, background, img):
+def run_kfold_training(prep, background, img, K=4):
     train_data = prep.load_dataset(train=True)
-    dataset_splited_4fold = prep.split_data(train_data, K=4)
+    dataset_splited_4fold = prep.split_data(train_data, K=K)
     dico_phi = {}
     dico_pred = {}
     c = 1
@@ -330,7 +330,9 @@ if __name__ == "__main__":
     images, labels = next(iter(train_loader))
     img = images[0]
     label = labels[0].item()
-    print('\n label img :', label)
+    true_class_name = train_data.classes[label]
+
+    print(f'\n label img and name: {label}, {true_class_name}')
 
     # Juste exécuter la boucle KFold
     dico_phi, dico_pred, img, train_data = run_kfold_training(
