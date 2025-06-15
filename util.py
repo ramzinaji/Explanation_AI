@@ -7,9 +7,11 @@ from torchvision.models import resnet18
 from sklearn.model_selection import KFold
 import numpy as np
 import shap
+from copy import deepcopy
 from sklearn.metrics.pairwise import cosine_distances
 from sklearn.metrics.pairwise import euclidean_distances
 import os
+import matplotlib.pyplot as plt
 
 
 # 1️⃣ Classe de prétraitement
@@ -84,50 +86,19 @@ class Trainer:
             output = self.model(x)
             return torch.argmax(output, dim=1).item()
 
-    def randomize_weights(model, noise_std):
-    """
-    Add Gaussian noise to model weights with standard deviation = noise_std * original_weight_std
-    noise_std: 0.05, 0.1, 0.3 as in paper (5%, 10%, 30% degradation)
-    """
-    with torch.no_grad():
-        for param in model.parameters():
-            if param.requires_grad:
-                std_original = param.data.std().item()
-                noise = torch.randn_like(param) * (noise_std * std_original)
-                param.data.add_(noise)
-    return model
-
-    def run_degradation_experiment(original_model, degradation_levels=[0.0, 0.05, 0.1, 0.3]):
+    def randomize_weights(self, noise_std):
         """
-        Measure MeGe/ReCo at different degradation levels
-        Returns: Dict with {'MeGe': [...], 'ReCo': [...]} per degradation level
+        Add Gaussian noise to model weights with standard deviation = noise_std * original_weight_std
+        noise_std: 0.05, 0.1, 0.3 as in paper (5%, 10%, 30% degradation)
         """
-        label_x = labels_test[11]
-        results = {'MeGe': [], 'ReCo': []}
-        
-        for level in degradation_levels:
-            # Create degraded model
-            degraded_model = deepcopy(original_model)
-            if level > 0:
-                degraded_model = randomize_weights(degraded_model, level)
-            
-            # Compute explanations and metrics 
-            dico_phi, dico_pred = compute_pred_phi(degraded_model)
-            S_eq, S_neq = compute_explanation_distances(dico_phi, dico_pred,label_x)
-            
-            # Calculate metrics
-            if len(S) == 0:
-                MeGe = 0  # or some other appropriate value
-            else:
-                MeGe = 1 / (1 + (1 / len(S.keys()))*np.sum(list(S.values())))
-            ReCo = compute_ReCo(S_eq, S_neq)  
-            
-            results['MeGe'].append(MeGe)
-            results['ReCo'].append(ReCo)
-            
-            print(f"Degradation {level*100}%: MeGe={MeGe:.3f}, ReCo={ReCo:.3f}")
-        
-        return results
+        with torch.no_grad():
+            for param in self.model.parameters():
+                if param.requires_grad:
+                    std_original = param.data.std().item()
+                    noise = torch.randn_like(
+                        param) * (noise_std * std_original)
+                    param.data.add_(noise)
+        return self.model
 
 
 # 3️⃣ Classe pour SHAP
@@ -150,7 +121,7 @@ class Explainer:
     def shap_explain(self, image):
         try:
             if len(image.shape) == 3:
-                # attention inuput de la fonction doit être de la dimension d'un batch (shape: [1, 3, 224, 224])
+                # attention input de la fonction doit être de la dimension d'un batch (shape: [1, 3, 224, 224])
                 shap_values = self.explainer.shap_values(image.unsqueeze(0))
                 output = self.model(image.unsqueeze(0))
                 predicted_class = output.argmax(dim=1).item()
@@ -160,8 +131,9 @@ class Explainer:
                 output = self.model(image)
                 predicted_class = output.argmax(dim=1).item()
 
-        except:
-            print('Image dimension failed')
+        except Exception as e:
+            print(f'Image dimension failed: {e}')
+            return None, None
 
         reshaped_shape_values = shap_values[..., predicted_class].squeeze(0)
         reshaped_shape_values_hwc = reshaped_shape_values.transpose(1, 2, 0)
@@ -169,38 +141,6 @@ class Explainer:
 
         return reshaped_shape_values_hwc, image_test_hwc
 
-
-# class ConsistencyMetrics:
-#     def __init__(self, dico_phi, dico_pred, img, label):
-#         self.dico_phi = dico_phi
-#         self.dico_pred = dico_pred
-#         self.img = img
-#         self.label = label
-
-#     def compute_metrics(self):
-#         c = 0
-#         S = {}
-#         S_d = {}
-#         distances = {}
-#         n = len(self.dico_phi.keys())
-#         for i in self.dico_phi.keys():
-#             c += 1
-#             for j in range(c, n+1):
-#                 if i == j:
-#                     continue
-#                 else:
-#                     if self.dico_pred[i] == int(self.label) and self.dico_pred[j] == int(self.label):
-#                         distances[(i, j)] = euclidean_distances(
-#                             self.dico_phi[i], self.dico_phi[j])
-#                         S[(i, j)] = float(distances[(i, j)])
-#                     else:
-#                         distances[(i, j)] = euclidean_distances(
-#                             self.dico_phi[i], self.dico_phi[j])
-#                         S_d[(i, j)] = float(distances[(i, j)])
-
-#         MeGe_x = 1 / (1 + (1 / len(S.keys()))*np.sum(list(S.values())))
-
-#         return S, S_d, MeGe_x
 
 class ConsistencyMetrics:
     def __init__(self, dico_phi, dico_pred, img, label, dist='euclidean'):
@@ -251,6 +191,100 @@ class ConsistencyMetrics:
 
         return S, S_d, MeGe_x
 
+    def compute_ReCo(self, S, S_d):
+        """
+        Compute Relative Consistency (ReCo) given:
+        - S:   Distances when both models agree (correct predictions)
+        - S_d: Distances when models disagree (one correct, one wrong)
+
+        Returns:
+        - ReCo score (higher = more consistent explanations)
+        """
+        if len(S) == 0 or len(S_d) == 0:
+            return 0.0  # Edge case: no comparable samples
+
+        all_dists = np.array(list(S.values()) + list(S_d.values()))
+        labels = np.array([0]*len(S) + [1]*len(S_d))
+
+        best_balanced_acc = 0
+
+        for gamma in np.unique(all_dists):
+            preds = (all_dists <= gamma).astype(int)
+
+            # TPR: True Positive Rate (sensibilité)
+            if np.sum(labels == 0) > 0:
+                tpr = np.sum((preds == 0) & (labels == 0)) / \
+                    np.sum(labels == 0)
+            else:
+                tpr = 0
+
+            # TNR: True Negative Rate (spécificité)
+            if np.sum(labels == 1) > 0:
+                tnr = np.sum((preds == 1) & (labels == 1)) / \
+                    np.sum(labels == 1)
+            else:
+                tnr = 0
+
+            balanced_acc = tpr + tnr - 1
+
+            if balanced_acc > best_balanced_acc:
+                best_balanced_acc = balanced_acc
+
+        return max(best_balanced_acc, 0)
+
+    def run_degradation_experiment(self, prep, background, degradation_levels=[0.0, 0.05, 0.1, 0.3]):
+        """
+        Measure MeGe/ReCo at different degradation levels
+        Returns: Dict with {'MeGe': [...], 'ReCo': [...]} per degradation level
+        """
+        results = {'MeGe': [], 'ReCo': []}
+
+        for level in degradation_levels:
+            print(f"\nTesting degradation level: {level*100}%")
+
+            # Entraîner de nouveaux modèles avec ce niveau de dégradation
+            train_data = prep.load_dataset(train=True)
+            dataset_splited_4fold = prep.split_data(train_data, K=4)
+
+            dico_phi_deg = {}
+            dico_pred_deg = {}
+
+            for c, fold in enumerate(dataset_splited_4fold[0], 1):
+                model = Trainer(num_classes=10)
+                model.train(fold, epochs=1, max_batches=3)
+
+                # Appliquer la dégradation si nécessaire
+                if level > 0:
+                    model.randomize_weights(level)
+
+                expl = Explainer(model.model, background_data=background)
+                shap_map, _ = expl.shap_explain(self.img)
+
+                if shap_map is not None:
+                    dico_phi_deg[c] = shap_map
+                    predicted_class = model.predict(self.img.unsqueeze(0))
+                    dico_pred_deg[c] = predicted_class
+
+            # Calculer les métriques pour ce niveau de dégradation
+            if len(dico_phi_deg) > 1:  # Besoin d'au moins 2 modèles pour calculer les distances
+                metrics_deg = ConsistencyMetrics(
+                    dico_phi_deg, dico_pred_deg, self.img, self.label, dist=self.dist)
+
+                S_eq, S_neq, MeGe = metrics_deg.compute_metrics()
+                ReCo = metrics_deg.compute_ReCo(S_eq, S_neq)
+
+                results['MeGe'].append(MeGe)
+                results['ReCo'].append(ReCo)
+
+                print(
+                    f"Degradation {level*100}%: MeGe={MeGe:.3f}, ReCo={ReCo:.3f}")
+            else:
+                results['MeGe'].append(0.0)
+                results['ReCo'].append(0.0)
+                print(f"Degradation {level*100}%: Insufficient models trained")
+
+        return results
+
 
 def train_single_model(prep, epochs=1):
     train_data = prep.load_dataset(train=True)
@@ -269,31 +303,34 @@ def explain_and_plot(trainer, train_loader):
 
     img = next(iter(train_loader))[0][0]
     shap_map, img_np = expl.shap_explain(img)
-    output = trainer.model(img.unsqueeze(0))
-    pred = trainer.predict(img.unsqueeze(0))
 
-    print('class = ', pred)
+    if shap_map is not None and img_np is not None:
+        output = trainer.model(img.unsqueeze(0))
+        pred = trainer.predict(img.unsqueeze(0))
 
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(8, 5))
-    shap.image_plot(shap_map, img_np)
+        print('class = ', pred)
+
+        plt.figure(figsize=(8, 5))
+        shap.image_plot(shap_map, img_np)
 
 
-def run_kfold_training(prep, background, img):
+def run_kfold_training(prep, background, img, K=4, batch=3):
     train_data = prep.load_dataset(train=True)
-    dataset_splited_4fold = prep.split_data(train_data, K=4)
+    dataset_splited_4fold = prep.split_data(train_data, K=K)
     dico_phi = {}
     dico_pred = {}
     c = 1
     for fold in dataset_splited_4fold[0]:
         print(f'\n split {c} ')
         model = Trainer(num_classes=10)
-        model.train(fold, epochs=1, max_batches=3)
+        model.train(fold, epochs=1, max_batches=batch)
         expl = Explainer(model.model, background_data=background)
         shap_map, img_np = expl.shap_explain(img)
-        dico_phi[c] = shap_map
-        predicted_class = model.predict(img.unsqueeze(0))
-        dico_pred[c] = predicted_class
+
+        if shap_map is not None:
+            dico_phi[c] = shap_map
+            predicted_class = model.predict(img.unsqueeze(0))
+            dico_pred[c] = predicted_class
         c += 1
     return dico_phi, dico_pred, img, train_data
 
@@ -308,88 +345,59 @@ def delete_folder(folder_path):
         os.rmdir(folder_path)
 
 
-# if __name__ == "__main__":
-
-#     # Initialisation
-#     prep = Preprocessor()
-#     train_data = prep.load_dataset(train=True)
-#     train_loader = prep.create_dataloader(train_data)
-
-#     # Split data
-#     train_data_split1 = prep.split_data(train_data, K=4)[
-#         0][0]  # test sur les 3 premiers batch
-
-#     # Modèle
-#     trainer = Trainer(num_classes=10)
-#     trainer.train(train_data_split1, epochs=1, max_batches=3)
-
-#     # Variables
-#     background = next(iter(train_loader))[0][:10]
-
-#     # Préparation SHAP
-#     expl = Explainer(trainer.model, background_data=background)
-
-#     # Visualisation SHAP
-#     img = next(iter(train_loader))[0][0]
-#     shap_map, img_np = expl.shap_explain(img)
-
-#     # Predict class
-#     output = trainer.model(img.unsqueeze(0))
-#     pred = trainer.predict(img.unsqueeze(0))
-#     # pred = trainer.predict(output)
-#     print('class = ', pred)
-
-#     # Affichage
-#     import matplotlib.pyplot as plt
-#     plt.figure(figsize=(8, 5))
-#     shap.image_plot(shap_map, img_np)
-
-#     # Boucle d'entrainement des K fonctions
-#     dataset_splited_4fold = prep.split_data(train_data, K=4)
-#     dico_phi = {}
-#     dico_pred = {}
-#     # Compteur
-#     c = 1
-#     for fold in dataset_splited_4fold[0]:
-#         print(f'\n split {c} ')
-#         model = Trainer(num_classes=10)
-#         model.train(fold, epochs=1, max_batches=3)
-#         expl = Explainer(model.model, background_data=background)
-#         shap_map, img_np = expl.shap_explain(img)
-#         # Sauvegarde des valeurs shaps pour img pour chaque fonction
-#         dico_phi[c] = shap_map
-#         predicted_class = model.predict(img.unsqueeze(0))
-#         # Sauvgarde des prédictions de chaque fonction
-#         dico_pred[c] = predicted_class
-#         c += 1
-
 if __name__ == "__main__":
     prep = Preprocessor()
     trainer, train_loader, train_data = train_single_model(prep)
 
-    # Facultatif : afficher l’explication SHAP
-    # explain_and_plot(trainer, train_loader)
-
     background = next(iter(train_loader))[0][:10]
-    # img = next(iter(train_loader))[0][0]
     images, labels = next(iter(train_loader))
     img = images[0]
     label = labels[0].item()
-    print('\n label img :', label)
+    true_class_name = train_data.classes[label]
 
-    # Juste exécuter la boucle KFold
+    print(f'\n label img and name: {label}, {true_class_name}')
+
+    # Exécuter la boucle KFold pour obtenir les métriques de base
     dico_phi, dico_pred, img, train_data = run_kfold_training(
-        prep, background, img)
+        prep, background, img, batch=50)
 
-    # Calcul le score MeGe et les matrices S
+    # Calculer le score MeGe et les matrices S
     metrics = ConsistencyMetrics(
         dico_phi, dico_pred, img, label, dist='cosine')
     S, S_d, MeGe_x = metrics.compute_metrics()
 
-    # Afficher l’explication SHAP
+    # Afficher l'explication SHAP
     explain_and_plot(trainer, train_loader)
     print('\n dico pred :', dico_pred)
     print('\n MeGe = ', MeGe_x, '\n S = ', S, '\n S_d = ', S_d)
+
+    # Expérience de dégradation
+    print("\n" + "="*50)
+    print("Starting degradation experiment...")
+    print("="*50)
+
+    degradation_levels = [0.0, 0.05, 0.1, 0.3]
+    results = metrics.run_degradation_experiment(
+        prep, background, degradation_levels)
+
+    print("\nResults at different degradation levels:")
+    for i, level in enumerate(degradation_levels):
+        print(
+            f"Degradation {level*100:4.1f}%: MeGe={results['MeGe'][i]:.3f}, ReCo={results['ReCo'][i]:.3f}")
+
+    # Plot results (as in paper Figure 3)
+    plt.figure(figsize=(10, 6))
+    plt.plot(degradation_levels,
+             results['MeGe'], marker='o', label='MeGe', linewidth=2, markersize=8)
+    plt.plot(degradation_levels,
+             results['ReCo'], marker='s', label='ReCo', linewidth=2, markersize=8)
+    plt.xlabel('Weight degradation level', fontsize=12)
+    plt.ylabel('Metric value', fontsize=12)
+    plt.legend(fontsize=12)
+    plt.title('Sanity Check: Metric Sensitivity to Model Degradation', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
     # Supprime le dossier ./data
     delete_folder('./data')
