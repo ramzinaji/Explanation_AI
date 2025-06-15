@@ -171,6 +171,51 @@ class Trainer:
             output = self.model(x)
             return torch.argmax(output, dim=1).item()
 
+    def randomize_weights(model, noise_std):
+    """
+    Add Gaussian noise to model weights with standard deviation = noise_std * original_weight_std
+    noise_std: 0.05, 0.1, 0.3 as in paper (5%, 10%, 30% degradation)
+    """
+    with torch.no_grad():
+        for param in model.parameters():
+            if param.requires_grad:
+                std_original = param.data.std().item()
+                noise = torch.randn_like(param) * (noise_std * std_original)
+                param.data.add_(noise)
+    return model
+
+    def run_degradation_experiment(original_model, degradation_levels=[0.0, 0.05, 0.1, 0.3]):
+        """
+        Measure MeGe/ReCo at different degradation levels
+        Returns: Dict with {'MeGe': [...], 'ReCo': [...]} per degradation level
+        """
+        label_x = labels_test[11]
+        results = {'MeGe': [], 'ReCo': []}
+        
+        for level in degradation_levels:
+            # Create degraded model
+            degraded_model = deepcopy(original_model)
+            if level > 0:
+                degraded_model = randomize_weights(degraded_model, level)
+            
+            # Compute explanations and metrics 
+            dico_phi, dico_pred = compute_pred_phi(degraded_model)
+            S_eq, S_neq = compute_explanation_distances(dico_phi, dico_pred,label_x)
+            
+            # Calculate metrics
+            if len(S) == 0:
+                MeGe = 0  # or some other appropriate value
+            else:
+                MeGe = 1 / (1 + (1 / len(S.keys()))*np.sum(list(S.values())))
+            ReCo = compute_ReCo(S_eq, S_neq)  
+            
+            results['MeGe'].append(MeGe)
+            results['ReCo'].append(ReCo)
+            
+            print(f"Degradation {level*100}%: MeGe={MeGe:.3f}, ReCo={ReCo:.3f}")
+        
+        return results
+
 
 # 3️⃣ Classe pour SHAP
 class Explainer:
